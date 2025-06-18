@@ -30,6 +30,7 @@ export type Extras = any;
 // TODO: Document known extensions and update this type
 export interface ExtensionDictionary {
   [index: string]: any;
+  materials_mapping?: number[];
 }
 
 export type VariantMapping = {
@@ -38,7 +39,7 @@ export type VariantMapping = {
 
 export type VariantMappings = Array<VariantMapping>;
 
-export type Variants = Array<{name: string}>;
+export type Variants = Array<{ name: string }>;
 
 export interface PerspectiveCameraIntrinsics {
   aspectRatio?: number;
@@ -58,7 +59,7 @@ export interface OrthographicCameraIntrinsics {
   extras?: Extras;
 }
 
-export type CameraType = 'perspective'|'orthographic';
+export type CameraType = 'perspective' | 'orthographic';
 
 export interface PerspectiveCamera {
   name?: string;
@@ -76,7 +77,7 @@ export interface OrthographicCamera {
   extras?: Extras;
 }
 
-export type Camera = PerspectiveCamera|OrthographicCamera;
+export type Camera = PerspectiveCamera | OrthographicCamera;
 
 export enum Filter {
   Nearest = 9728,
@@ -94,10 +95,10 @@ export type LinearMipmapNearestFilter = Filter.LinearMipmapNearest;
 export type NearestMipmapLinearFilter = Filter.NearestMipmapLinear;
 export type LinearMipmapLinearFilter = Filter.LinearMipmapLinear;
 
-export type MagFilter = NearestFilter|LinearFilter;
-export type MinFilter = NearestFilter|LinearFilter|NearestMipmapNearestFilter|
-    LinearMipmapNearestFilter|NearestMipmapLinearFilter|
-    LinearMipmapLinearFilter;
+export type MagFilter = NearestFilter | LinearFilter;
+export type MinFilter = NearestFilter | LinearFilter | NearestMipmapNearestFilter |
+  LinearMipmapNearestFilter | NearestMipmapLinearFilter |
+  LinearMipmapLinearFilter;
 
 export enum Wrap {
   ClampToEdge = 33071,
@@ -109,7 +110,7 @@ export type ClampToEdgeWrap = Wrap.ClampToEdge;
 export type MirroredRepeatWrap = Wrap.MirroredRepeat;
 export type RepeatWrap = Wrap.Repeat;
 
-export type WrapMode = RepeatWrap|ClampToEdgeWrap|MirroredRepeatWrap;
+export type WrapMode = RepeatWrap | ClampToEdgeWrap | MirroredRepeatWrap;
 
 export interface Sampler {
   name?: string;
@@ -154,7 +155,7 @@ export interface PBRMetallicRoughness {
   extras?: Extras;
 }
 
-export type AlphaMode = 'OPAQUE'|'MASK'|'BLEND';
+export type AlphaMode = 'OPAQUE' | 'MASK' | 'BLEND';
 
 export interface Material {
   name?: string;
@@ -222,7 +223,7 @@ export interface Scene {
   extras?: Extras;
 }
 
-export type AccessorType = 'SCALAR'|'VEC2'|'VEC3'|'VEC4'|'MAT2'|'MAT3'|'MAT4';
+export type AccessorType = 'SCALAR' | 'VEC2' | 'VEC3' | 'VEC4' | 'MAT2' | 'MAT3' | 'MAT4';
 
 export interface Accessor {
   name?: string;
@@ -242,7 +243,7 @@ export interface Accessor {
   sparse?: any;
 }
 
-export type ChannelTargetPath = 'rotation'|'scale'|'translation'|'weights';
+export type ChannelTargetPath = 'rotation' | 'scale' | 'translation' | 'weights';
 
 export interface ChannelTarget {
   node: number;
@@ -256,7 +257,7 @@ export interface Channel {
   extras?: Extras;
 }
 
-export type AnimationInterpolation = 'LINEAR'|'STEP'|'CUBICSPLINE';
+export type AnimationInterpolation = 'LINEAR' | 'STEP' | 'CUBICSPLINE';
 
 export interface AnimationSampler {
   input: number;
@@ -284,8 +285,8 @@ export interface Skin {
 }
 
 export type GLTFElement =
-    Scene|Node|Mesh|Material|Image|Texture|TextureInfo|Sampler|
-    PBRMetallicRoughness|Accessor|Camera|Animation|AnimationSampler|Skin;
+  Scene | Node | Mesh | Material | Image | Texture | TextureInfo | Sampler |
+  PBRMetallicRoughness | Accessor | Camera | Animation | AnimationSampler | Skin;
 
 export interface GLTFElementMap {
   'scene': Scene;
