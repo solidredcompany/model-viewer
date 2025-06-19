@@ -100,15 +100,13 @@ export class PrimitiveNode extends Node {
       }
     }
 
-    // Map multiple materials to a single mesh using the "materials_mapping" extension.
-    if (gltfPrimitive.extensions?.materials_mapping != undefined) {
-      const materials = gltfPrimitive.extensions?.materials_mapping;
-
-      materials.forEach(material => {
-        this.materials.set(
-          material, mvMaterials[material]
-        );
-      });
+    // Maps multiple materials to a single mesh using the "materials_mapping" extension.
+    if (gltfPrimitive.extensions && gltfPrimitive.extensions['materials_mapping']) {
+      const materialsMappingExtension = gltfPrimitive.extensions['materials_mapping'];
+      for (const material of materialsMappingExtension.materials) {
+        const mvMaterial = mvMaterials[material];
+        this.materials.set(material, mvMaterial);
+      }
     }
 
     if (gltfPrimitive.extensions &&

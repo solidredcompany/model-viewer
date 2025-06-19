@@ -30,7 +30,9 @@ export type Extras = any;
 // TODO: Document known extensions and update this type
 export interface ExtensionDictionary {
   [index: string]: any;
-  materials_mapping?: number[];
+  materials_mapping?: {
+    materials: number[];
+  };
 }
 
 export type VariantMapping = {
