@@ -24,7 +24,7 @@ export function switchPages(oldLocation: string, newLocation: string) {
     let URI = '';
     if (oldLocation === 'docs') {
       const category = getSidebarCategoryForNewPage();
-      URI = '../examples/'.concat(category);
+      URI = '../examples/'.concat(category).concat('/');
     } else {
       URI = newLocation;
     }
@@ -125,8 +125,10 @@ export function init(docsOrExample: string) {
 (self as any).initFooterLinks = initFooterLinks;
 
 function handleSideBarClickToggle(event: any) {
-  if (!(event.target.classList.contains('sidebar') || event.target.closest(".sidebar")) && !event.target.classList.contains("hamburgerInput")) {
-    if (event.target.classList.contains('tab')) {
+  if (!(event.target.classList.contains('sidebar') ||
+        event.target.closest('.sidebar')) &&
+      !event.target.classList.contains('hamburgerInput')) {
+    if (event.target.closest('.tab')) {
       document.getElementById('sidenav')?.classList.toggle('active');
     } else {
       if (document.getElementById('sidenav')?.classList.contains('active')) {

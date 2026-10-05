@@ -13,6 +13,8 @@
  * limitations under the License.
  */
 
+import '../renderer-gate.js';
+
 import {expect} from 'chai';
 import {Matrix4, PerspectiveCamera, Vector2, Vector3} from 'three';
 
@@ -238,6 +240,44 @@ suite('ARRenderer', () => {
       expect(scale.y).to.be.equal(1);
       expect(scale.z).to.be.equal(1);
     });
+
+    test(
+        'prevents default WebXR select when beforexrselect is triggered on interactive elements',
+        () => {
+          const button = document.createElement('button');
+          const event = new CustomEvent(
+              'beforexrselect', {bubbles: true, cancelable: true});
+          Object.defineProperty(event, 'composedPath', {
+            value: () => [button, (arRenderer as any).overlay]
+          });
+
+          let defaultPrevented = false;
+          event.preventDefault = () => {
+            defaultPrevented = true;
+          };
+
+          (arRenderer as any).overlay.dispatchEvent(event);
+          expect(defaultPrevented).to.be.equal(true);
+        });
+
+    test(
+        'does not prevent default WebXR select on non-interactive elements',
+        () => {
+          const div = document.createElement('div');
+          const event = new CustomEvent(
+              'beforexrselect', {bubbles: true, cancelable: true});
+          Object.defineProperty(event, 'composedPath', {
+            value: () => [div, (arRenderer as any).overlay]
+          });
+
+          let defaultPrevented = false;
+          event.preventDefault = () => {
+            defaultPrevented = true;
+          };
+
+          (arRenderer as any).overlay.dispatchEvent(event);
+          expect(defaultPrevented).to.be.equal(false);
+        });
 
     suite('presentation ends', () => {
       setup(async () => {

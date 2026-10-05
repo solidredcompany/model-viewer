@@ -13,6 +13,8 @@
  * limitations under the License.
  */
 
+import '../renderer-gate.js';
+
 import {expect} from 'chai';
 import {Vector3} from 'three';
 
@@ -185,8 +187,8 @@ suite('Annotation', () => {
           // following hide() call will happen first, then when the camera
           // moves, we never get a hotspot-visibility event because they were
           // already visible.
-          await rafPasses();
 
+          await rafPasses();
           wrapper = (scene.target.children[numSlots - 1] as Hotspot).element;
         });
 
@@ -234,6 +236,7 @@ suite('Annotation', () => {
 
     test('gets expected hit result when turned', async () => {
       element.resetTurntableRotation(-Math.PI / 2);
+      element[$scene].updateMatrixWorld();
       await rafPasses();
       const hitResult = element.positionAndNormalFromPoint(
           rect.width / 2 + rect.x, rect.height / 2 + rect.y);

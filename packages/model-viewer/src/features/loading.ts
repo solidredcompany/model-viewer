@@ -205,8 +205,9 @@ export const LoadingMixin = <T extends Constructor<ModelViewerElementBase>>(
      *
      * The default value is "auto". The only supported alternative values are
      * "lazy" and "eager". Auto is equivalent to lazy, which loads the model
-     * when it is near the viewport for reveal = "auto", and when interacted
-     * with for reveal = "interaction". Eager loads the model immediately.
+     * when it is near the viewport for reveal = "auto", and when
+     * dismissPoster() is called for reveal = "manual". Eager loads the model
+     * immediately.
      */
     @property({type: String})
     loading: LoadingAttributeValue = LoadingStrategy.AUTO;
@@ -252,10 +253,12 @@ export const LoadingMixin = <T extends Constructor<ModelViewerElementBase>>(
      * turntable rotation.
      */
     getDimensions(): Vector3D {
+      this[$scene].updateBoundingBoxAndShadowIfDirty();
       return toVector3D(this[$scene].size);
     }
 
     getBoundingBoxCenter(): Vector3D {
+      this[$scene].updateBoundingBoxAndShadowIfDirty();
       return toVector3D(this[$scene].boundingBox.getCenter(new Vector3()));
     }
 
@@ -295,7 +298,8 @@ export const LoadingMixin = <T extends Constructor<ModelViewerElementBase>>(
           parentNode.appendChild(this[$defaultProgressBarElement]);
         }
 
-        this[$defaultProgressBarElement].classList.toggle('hide', progress === 1.0);
+        this[$defaultProgressBarElement].classList.toggle(
+            'hide', progress === 1.0);
       });
     }, PROGRESS_BAR_UPDATE_THRESHOLD);
 
@@ -321,7 +325,9 @@ export const LoadingMixin = <T extends Constructor<ModelViewerElementBase>>(
 
       const lottieLoaderLocation = ModelViewerElement.lottieLoaderLocation ||
           DEFAULT_LOTTIE_LOADER_LOCATION;
-      Renderer.singleton.textureUtils!.lottieLoaderUrl = lottieLoaderLocation;
+      if (Renderer.singleton.textureUtils != null) {
+        Renderer.singleton.textureUtils.lottieLoaderUrl = lottieLoaderLocation;
+      }
     }
 
     connectedCallback() {
@@ -373,12 +379,13 @@ export const LoadingMixin = <T extends Constructor<ModelViewerElementBase>>(
 
       this[$updateProgressBar](progress);
 
-      this.dispatchEvent(
-          new CustomEvent('progress', {detail: {totalProgress: progress, reason}}));
+      this.dispatchEvent(new CustomEvent(
+          'progress', {detail: {totalProgress: progress, reason}}));
     };
 
     [$shouldAttemptPreload](): boolean {
-      return !!this.src &&
+      const extraModels = Array.from(this.querySelectorAll('extra-model'));
+      return !!(this.src || extraModels.length > 0) &&
           (this[$shouldDismissPoster] ||
            this.loading === LoadingStrategy.EAGER ||
            (this.reveal === RevealStrategy.AUTO && this[$isElementInViewport]));

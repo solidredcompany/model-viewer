@@ -13,6 +13,8 @@
  * limitations under the License.
  */
 
+import '../renderer-gate.js';
+
 import {expect} from 'chai';
 
 import {$scene} from '../../model-viewer-base.js';
@@ -27,7 +29,8 @@ const ANIMATED_GLB_DUPLICATE_ANIMATION_NAMES_PATH =
     assetPath('models/DuplicateAnimationNames.glb');
 
 const animationIsPlaying = (element: any, animationName?: string): boolean => {
-  const {currentAnimationAction} = element[$scene];
+  const currentAnimationAction =
+      (element[$scene] as any).currentAnimationActions[0];
 
   if (currentAnimationAction != null &&
       (animationName == null ||
@@ -42,8 +45,9 @@ const animationIsPlaying = (element: any, animationName?: string): boolean => {
 
 const animationWithIndexIsPlaying = (element: any, animationIndex = 0):
     boolean => {
-      const {currentAnimationAction} = element[$scene];
-      const {_currentGLTF} = element[$scene];
+      const currentAnimationAction =
+          (element[$scene] as any).currentAnimationActions[0];
+      const _currentGLTF = (element[$scene] as any)._currentGLTFs[0];
 
       if (currentAnimationAction != null && animationIndex >= 0 &&
           animationIndex < _currentGLTF.animations.length &&
@@ -76,6 +80,46 @@ suite('Animation', () => {
     test('remains in a paused state', () => {
       expect(element.paused).to.be.true;
     });
+
+    test('dispatches "finished" when a repetition-limited animation completes',
+        async () => {
+          element.play({repetitions: 1, pingpong: false});
+          await element.updateComplete;
+
+          const finished = waitForEvent(element, 'finished');
+          // Jump near the end so the LoopOnce action completes quickly (the
+          // default clip is longer than the test timeout).
+          element.currentTime = Math.max(element.duration - 0.05, 0);
+          await timePasses(500);
+          await finished;
+        });
+
+    // Regression test: setting `animationName` schedules an async reactive
+    // update whose updated() re-triggers playback. It used to do so with the
+    // default (infinite-loop) options, clobbering a `play({repetitions: 1})`
+    // issued in the same tick, so the animation looped forever and never
+    // emitted 'finished'.
+    test('dispatches "finished" when animationName is set then played once',
+        async () => {
+          const target = element.availableAnimations.find(
+                             (name) => name !== element.animationName) ??
+              element.availableAnimations[0];
+
+          element.animationName = target;
+          // Restart from the first frame, mirroring how a one-time animation is
+          // typically (re)played after a previous one finished and clamped.
+          element.currentTime = 0;
+          element.play({repetitions: 1, pingpong: false});
+
+          // Flush the animationName update, where the clobber used to happen.
+          await element.updateComplete;
+
+          const finished = waitForEvent(element, 'finished');
+          // Jump near the end so the LoopOnce action completes quickly.
+          element.currentTime = Math.max(element.duration - 0.05, 0);
+          await timePasses(500);
+          await finished;
+        });
 
     suite('when play is invoked with no options', () => {
       setup(async () => {
@@ -163,6 +207,22 @@ suite('Animation', () => {
             .to.be.false;
         expect(element.currentTime, 'did not return to beginning of animation!')
             .to.be.equal(0);
+      });
+    });
+
+    suite('when appendAnimation is invoked', () => {
+      setup(async () => {
+        const appendEvent = waitForEvent(element, 'append-animation');
+        element.appendAnimation('Punch', {weight: 1.0});
+        await appendEvent;
+      });
+
+      test('unpauses the model', () => {
+        expect(element.paused).to.be.false;
+      });
+
+      test('adds the animation to appendedAnimations', () => {
+        expect(element.appendedAnimations).to.include('Punch');
       });
     });
 

@@ -19,6 +19,7 @@ import {RGBELoader} from 'three/examples/jsm/loaders/RGBELoader.js';
 
 import {deserializeUrl, timePasses} from '../utilities.js';
 
+import {ktx2Loader} from './CachingGLTFLoader.js';
 import EnvironmentScene from './EnvironmentScene.js';
 
 export interface EnvironmentMapAndSkybox {
@@ -32,6 +33,7 @@ const GENERATED_SIGMA = 0.04;
 const MAX_SAMPLES = 20;
 
 const HDR_FILE_RE = /\.hdr(\.js)?$/;
+const KTX2_FILE_RE = /\.ktx2(\?|#|$)/;
 
 export default class TextureUtils {
   public lottieLoaderUrl = '';
@@ -87,10 +89,25 @@ export default class TextureUtils {
     return this._lottieLoader;
   }
 
-  async loadImage(url: string, withCredentials: boolean): Promise<Texture> {
+  async loadImage(url: string, withCredentials: boolean, type?: string):
+      Promise<Texture> {
+    if (type === 'image/ktx2' || KTX2_FILE_RE.test(url)) {
+      return this.loadKTX2(url, withCredentials);
+    }
     const texture: Texture = await new Promise<Texture>(
         (resolve, reject) => this.ldrLoader(withCredentials)
                                  .load(url, resolve, () => {}, reject));
+    texture.name = url;
+    texture.flipY = false;
+
+    return texture;
+  }
+
+  private async loadKTX2(url: string, withCredentials: boolean):
+      Promise<Texture> {
+    ktx2Loader.setWithCredentials(withCredentials);
+    const texture: Texture = await new Promise<Texture>(
+        (resolve, reject) => ktx2Loader.load(url, resolve, () => {}, reject));
     texture.name = url;
     texture.flipY = false;
 
@@ -119,12 +136,39 @@ export default class TextureUtils {
       const texture: Texture = await new Promise<Texture>(
           (resolve, reject) => loader.load(
               url,
-              (result) => {
+              (result: any) => {
                 const {renderTarget} =
                     result as QuadRenderer<1016, GainMapDecoderMaterial>;
                 if (renderTarget != null) {
-                  const {texture} = renderTarget;
-                  result.dispose(false);
+                  let texture: Texture;
+                  try {
+                    const dataTexture = result.toDataTexture();
+                    dataTexture.needsUpdate = true;
+                    const data = dataTexture.image.data as ArrayLike<number>;
+                    let hasContent = false;
+                    const len = data.length;
+                    for (let i = 0; i < len; i++) {
+                      if (data[i] !== 0) {
+                        hasContent = true;
+                        break;
+                      }
+                    }
+                    if (hasContent) {
+                      texture = dataTexture;
+                      result.dispose(true);
+                    } else {
+                      console.warn(
+                          'Decoded DataTexture is completely black, falling back to render target texture.');
+                      texture = renderTarget.texture;
+                      result.dispose(false);
+                    }
+                  } catch (e) {
+                    console.warn(
+                        'Failed to convert gainmap to DataTexture, falling back to render target texture:',
+                        e);
+                    texture = renderTarget.texture;
+                    result.dispose(false);
+                  }
                   resolve(texture);
                 } else {
                   resolve(result as DataTexture);
@@ -140,7 +184,7 @@ export default class TextureUtils {
       texture.name = url;
       texture.mapping = EquirectangularReflectionMapping;
 
-      if (!isHDR) {
+      if (!isHDR && texture.type !== HalfFloatType) {
         texture.colorSpace = SRGBColorSpace;
       }
 
@@ -213,6 +257,13 @@ export default class TextureUtils {
           this.loadEquirect(url, withCredentials, progressCallback);
 
       this.skyboxCache.set(url, skyboxMapLoads);
+
+      // Do not keep a failed load, or the same URL could never be retried.
+      skyboxMapLoads.catch(() => {
+        if (this.skyboxCache.get(url) === skyboxMapLoads) {
+          this.skyboxCache.delete(url);
+        }
+      });
     }
 
     return this.skyboxCache.get(url)!;

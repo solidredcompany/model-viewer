@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 
-import {Box3, BufferGeometry, Event as ThreeEvent, EventDispatcher, Line, Matrix4, PerspectiveCamera, Quaternion, Vector3, WebGLRenderer, XRControllerEventType, XRTargetRaySpace, Object3D} from 'three';
+import {Box3, BufferGeometry, Camera, Event as ThreeEvent, EventDispatcher, Line, Matrix4, Object3D, PerspectiveCamera, Quaternion, Vector3, WebGLRenderer, XRControllerEventType, XRTargetRaySpace} from 'three';
 import {XREstimatedLight} from 'three/examples/jsm/webxr/XREstimatedLight.js';
 
 import {CameraChangeDetails, ControlsInterface} from '../features/controls.js';
@@ -26,7 +26,7 @@ import {ModelScene} from './ModelScene.js';
 import {PlacementBox} from './PlacementBox.js';
 import {Renderer} from './Renderer.js';
 import {ChangeSource} from './SmoothControls.js';
-import { XRMenuPanel } from './XRMenuPanel.js';
+import {XRMenuPanel} from './XRMenuPanel.js';
 
 // number of initial null pose XRFrames allowed before we post not-tracking
 const INIT_FRAMES = 30;
@@ -54,6 +54,21 @@ const MAX_LINE_LENGTH = 5;
 const AXIS_Y = new Vector3(0, 1, 0);
 // Webxr rotation sensitivity
 const ROTATION_SENSIVITY = 0.3;
+
+// World-space AR automatic positioning constants (similar to FrameModel
+// approach in SVXR)
+const MIN_WORLD_SPACE_DISTANCE = 1.5;  // Minimum distance from camera (meters)
+const VIEW_DROP_DEGREES =
+    15;                  // Angle down from camera center for optimal viewing
+const VIEW_RATIO = 0.3;  // Ratio of viewport to use for model sizing
+const MIN_MODEL_SIZE = 0.01;  // Minimum model size to prevent division by zero
+const PLACEMENT_BOX_EXTRA_PADDING = 0.15;  // Extra padding for model-viewer
+
+// SVXR-like constants for scale limits
+const MAX_MODEL_SIZE = 70.0;
+const MODEL_SIZE_EPSILON = 0.001;
+
+const FOOTPRINT__INTERSECT_THRESHOLD = 0.2;
 
 export type ARStatus =
     'not-presenting'|'session-started'|'object-placed'|'failed';
@@ -129,7 +144,7 @@ export class ARRenderer extends EventDispatcher<
   private exitWebXRButtonContainer: HTMLElement|null = null;
   private overlay: HTMLElement|null = null;
   private xrLight: XREstimatedLight|null = null;
-  private xrMode: XRMode | null = null;
+  private xrMode: XRMode|null = null;
   private xrController1: XRController|null = null;
   private xrController2: XRController|null = null;
   private selectedXRController: XRController|null = null;
@@ -157,8 +172,25 @@ export class ARRenderer extends EventDispatcher<
   private pitchDamper = new Damper();
   private rollDamper = new Damper();
   private scaleDamper = new Damper();
+  private wasTwoFingering = false;
+
+  // Track if initial automatic placement has been done for world-space mode
+  private worldSpaceInitialPlacementDone = false;
+
+  // Scale toggle state for world-space mode
+  private initialModelScale = 1.0;
+  private minScale = 1.0;
+  private maxScale = 1.0;
 
   private onExitWebXRButtonContainerClick = () => this.stopPresenting();
+
+  /**
+   * Check if world-space mode is active and initial placement is complete
+   */
+  private isWorldSpaceReady(): boolean {
+    return this.xrMode === XRMode.WORLD_SPACE &&
+        this.worldSpaceInitialPlacementDone;
+  }
 
   constructor(private renderer: Renderer) {
     super();
@@ -229,6 +261,9 @@ export class ARRenderer extends EventDispatcher<
     // This sets isPresenting to true
     this._presentedScene = scene;
     this.overlay = scene.element.shadowRoot!.querySelector('div.default');
+    if (this.overlay != null) {
+      this.overlay.addEventListener('beforexrselect', this.onBeforeXRSelect);
+    }
 
     if (environmentEstimation === true) {
       this.xrLight = new XREstimatedLight(this.threeRenderer);
@@ -278,6 +313,8 @@ export class ARRenderer extends EventDispatcher<
 
     scene.element.addEventListener('load', this.onUpdateScene);
 
+    // Create hit test source for all modes (will be used differently based on
+    // mode and state)
     const radians = HIT_ANGLE_DEG * Math.PI / 180;
     const ray = this.placeOnWall === true ?
         undefined :
@@ -298,17 +335,25 @@ export class ARRenderer extends EventDispatcher<
       this.yawDamper.setDecayTime(DECAY);
       this.pitchDamper.setDecayTime(DECAY);
       this.rollDamper.setDecayTime(DECAY);
+      this.scaleDamper.setDecayTime(DECAY);
     }
 
     this.currentSession = currentSession;
     this.placementBox =
         new PlacementBox(scene, this.placeOnWall ? 'back' : 'bottom');
+
+    // Set screen space mode for proper positioning
+    if (this.placementBox) {
+      this.placementBox.setScreenSpaceMode(this.xrMode === XRMode.SCREEN_SPACE);
+    }
+
     this.placementComplete = false;
 
     if (this.xrMode !== XRMode.SCREEN_SPACE) {
       this.menuPanel = new XRMenuPanel();
       scene.add(this.menuPanel);
-      this.menuPanel.updatePosition(scene.getCamera(), this.placementBox!); // Position the menu panel
+      this.menuPanel.updatePosition(
+          scene.getCamera(), this.placementBox!);  // Position the menu panel
     }
 
     this.lastTick = performance.now();
@@ -364,18 +409,35 @@ export class ARRenderer extends EventDispatcher<
   }
 
   private controllerSeparation() {
-    return this.xrController1!.position.distanceTo(this.xrController2!.position);
+    return this.xrController1!.position.distanceTo(
+        this.xrController2!.position);
   }
 
   private onControllerSelectStart = (event: XRControllerEvent) => {
     const scene = this.presentedScene!;
     const controller = event.target;
     const menuPanel = this.menuPanel;
-  
-    const exitIntersect = this.menuPanel!.exitButtonControllerIntersection(scene, controller);
+
+    const exitIntersect =
+        this.menuPanel!.exitButtonControllerIntersection(scene, controller);
     if (exitIntersect != null) {
       this.menuPanel?.dispose();
       this.stopPresenting();
+      return;
+    }
+
+    const scaleModeIntersect =
+        this.menuPanel!.scaleModeButtonControllerIntersection(
+            scene, controller);
+    if (scaleModeIntersect != null) {
+      const goalScale = this.menuPanel!.handleScaleToggle(
+          this.worldSpaceInitialPlacementDone,
+          this.initialModelScale,
+          this.minScale,
+          this.maxScale);
+      if (goalScale !== null) {
+        this.goalScale = goalScale;
+      }
       return;
     }
 
@@ -383,24 +445,26 @@ export class ARRenderer extends EventDispatcher<
       menuPanel!.show = false;
     }
 
-    const intersection = this.placementBox!.controllerIntersection(scene,
-      controller);
-    if (intersection!=null){
-      const bbox = new Box3().setFromObject(scene.pivot);
-      const footprintY = bbox.min.y + 0.2; // Small threshold above base
+    const intersection =
+        this.placementBox!.controllerIntersection(scene, controller);
+    if (intersection != null) {
+      const bbox = new Box3().setFromObject(scene.scenePivot);
+      const footprintY = bbox.min.y +
+          FOOTPRINT__INTERSECT_THRESHOLD;  // Small threshold above base
 
       // Check if the ray intersection is near the footprint
       const isFootprint = intersection.point.y <= footprintY;
       if (isFootprint) {
         if (this.selectedXRController != null) {
           this.selectedXRController.userData.line.visible = false;
-          if (scene.canScale) {
+          if (scene.canScale && this.isWorldSpaceReady()) {
             this.isTwoHandInteraction = true;
-            this.firstRatio = this.controllerSeparation() / scene.pivot.scale.x;
+            this.firstRatio =
+                this.controllerSeparation() / scene.scenePivot.scale.x;
             this.scaleLine.visible = true;
           }
         } else {
-          controller.attach(scene.pivot);
+          controller.attach(scene.scenePivot);
         }
         this.selectedXRController = controller;
         scene.setShadowIntensity(0.01);
@@ -411,19 +475,22 @@ export class ARRenderer extends EventDispatcher<
           this.xrController2.userData.isSelected = true;
         }
 
-        if (this.xrController1?.userData.isSelected && this.xrController2?.userData.isSelected) {
-          if (scene.canScale) {
+        if (this.xrController1?.userData.isSelected &&
+            this.xrController2?.userData.isSelected) {
+          if (scene.canScale && this.isWorldSpaceReady()) {
             this.isTwoHandInteraction = true;
-            this.firstRatio = this.controllerSeparation() / scene.pivot.scale.x;
+            this.firstRatio =
+                this.controllerSeparation() / scene.scenePivot.scale.x;
             this.scaleLine.visible = true;
           }
         } else {
-            const otherController = controller === this.xrController1 ? this.xrController2! :
-            this.xrController1!;
-            controller.userData.initialX = controller.position.x;
-            otherController.userData.turning = false;
-            controller.userData.turning = true;
-            controller.userData.line.visible = false;
+          const otherController = controller === this.xrController1 ?
+              this.xrController2! :
+              this.xrController1!;
+          controller.userData.initialX = controller.position.x;
+          otherController.userData.turning = false;
+          controller.userData.turning = true;
+          controller.userData.line.visible = false;
         }
       }
     }
@@ -448,12 +515,18 @@ export class ARRenderer extends EventDispatcher<
     }
     const scene = this.presentedScene!;
     // drop on floor
-    scene.attach(scene.pivot);
+    scene.attach(scene.scenePivot);
     this.selectedXRController = null;
     this.goalYaw = Math.atan2(
-        scene.pivot.matrix.elements[8], scene.pivot.matrix.elements[10]);
-    this.goalPosition.x = scene.pivot.position.x;
-    this.goalPosition.z = scene.pivot.position.z;
+        scene.scenePivot.matrix.elements[8],
+        scene.scenePivot.matrix.elements[10]);
+    this.goalPosition.x = scene.scenePivot.position.x;
+    this.goalPosition.z = scene.scenePivot.position.z;
+
+    // For world-space mode after initial placement, preserve Y position
+    if (this.isWorldSpaceReady()) {
+      this.goalPosition.y = scene.scenePivot.position.y;
+    }
 
     const menuPanel = this.menuPanel;
     menuPanel!.show = true;
@@ -512,26 +585,31 @@ export class ARRenderer extends EventDispatcher<
 
   onUpdateScene = () => {
     if (this.placementBox != null && this.isPresenting) {
-      this.placementBox!.dispose();
-      this.placementBox = new PlacementBox(
-          this.presentedScene!, this.placeOnWall ? 'back' : 'bottom');
+      // Update the existing placement box with new model dimensions instead of
+      // recreating
+      this.placementBox!.updateFromModelChanges();
+
+      // Ensure screen space mode is maintained
+      this.placementBox!.setScreenSpaceMode(
+          this.xrMode === XRMode.SCREEN_SPACE);
     }
     if (this.xrMode !== XRMode.SCREEN_SPACE) {
-        if (this.menuPanel) {
-          this.menuPanel.dispose(); 
-          this.menuPanel = null;
-        }
-        this.menuPanel = new XRMenuPanel();
-        this.presentedScene!.add(this.menuPanel);
-        this.menuPanel.updatePosition(this.presentedScene!.getCamera(), this.placementBox!);
+      if (this.menuPanel) {
+        this.menuPanel.dispose();
+        this.menuPanel = null;
       }
-
+      this.menuPanel = new XRMenuPanel();
+      this.presentedScene!.add(this.menuPanel);
+      this.menuPanel.updatePosition(
+          this.presentedScene!.getCamera(), this.placementBox!);
+    }
   };
 
   private cleanupXRController(xrController: XRController) {
     xrController.userData.turning = false;
     xrController.userData.line.visible = true;
-    xrController.removeEventListener('selectstart', this.onControllerSelectStart);
+    xrController.removeEventListener(
+        'selectstart', this.onControllerSelectStart);
     xrController.removeEventListener('selectend', this.onControllerSelectEnd);
     xrController.removeFromParent();
   }
@@ -560,10 +638,10 @@ export class ARRenderer extends EventDispatcher<
         this.menuPanel = null;
       }
 
-      scene.add(scene.pivot);
-      scene.pivot.quaternion.set(0, 0, 0, 1);
-      scene.pivot.position.set(0, 0, 0);
-      scene.pivot.scale.set(1, 1, 1);
+      scene.add(scene.scenePivot);
+      scene.scenePivot.quaternion.set(0, 0, 0, 1);
+      scene.scenePivot.position.set(0, 0, 0);
+      scene.scenePivot.scale.set(1, 1, 1);
       scene.setShadowOffset(0);
       const yaw = this.turntableRotation;
       if (yaw != null) {
@@ -640,7 +718,11 @@ export class ARRenderer extends EventDispatcher<
     this.oldShadowIntensity = null;
     this.frame = null;
     this.inputSource = null;
-    this.overlay = null;
+    if (this.overlay != null) {
+      this.overlay.removeEventListener('beforexrselect', this.onBeforeXRSelect);
+      this.overlay = null;
+    }
+    this.worldSpaceInitialPlacementDone = false;
 
     if (this.resolveCleanup != null) {
       this.resolveCleanup!();
@@ -680,8 +762,8 @@ export class ARRenderer extends EventDispatcher<
 
   private placeInitially() {
     const scene = this.presentedScene!;
-    const {pivot, element} = scene;
-    const {position} = pivot;
+    const {scenePivot, element} = scene;
+    const {position} = scenePivot;
     const xrCamera = scene.getCamera();
 
     const {width, height} = this.overlay!.getBoundingClientRect();
@@ -697,15 +779,44 @@ export class ARRenderer extends EventDispatcher<
     scene.yaw = Math.atan2(-cameraDirection.x, -cameraDirection.z) - theta;
     this.goalYaw = scene.yaw;
 
-    const radius = Math.max(1, 2 * scene.boundingSphere.radius);
-    position.copy(xrCamera.position)
-        .add(cameraDirection.multiplyScalar(radius));
+    // Use different placement logic for world-space vs screen-space
+    if (this.xrMode === XRMode.WORLD_SPACE &&
+        !this.worldSpaceInitialPlacementDone) {
+      // Use automatic optimal placement for world-space AR only on first
+      // session
+      const {position: optimalPosition, scale: optimalScale} =
+          this.calculateWorldSpaceOptimalPlacement(scene, xrCamera);
 
-    this.updateTarget();
-    const target = scene.getTarget();
-    position.add(target).sub(this.oldTarget);
+      this.goalPosition.copy(optimalPosition);
+      this.goalScale = optimalScale;
 
-    this.goalPosition.copy(position);
+      // Store the initial scale for toggle functionality
+      this.initialModelScale = optimalScale;
+
+      // Set initial position and scale immediately for world-space
+      position.copy(optimalPosition);
+      scenePivot.scale.set(optimalScale, optimalScale, optimalScale);
+
+      // Mark that initial placement is done
+      this.worldSpaceInitialPlacementDone = true;
+
+      // Calculate scale limits for world-space mode (SVXR logic)
+      this.calculateWorldSpaceScaleLimits(scene);
+
+      // Enable user interaction after initial placement
+      this.enableWorldSpaceUserInteraction();
+    } else if (this.xrMode === XRMode.SCREEN_SPACE) {
+      // Use original placement logic for screen-space AR
+      const radius = Math.max(1, 2 * scene.boundingSphere.radius);
+      position.copy(xrCamera.position)
+          .add(cameraDirection.multiplyScalar(radius));
+
+      this.updateTarget();
+      const target = scene.getTarget();
+      position.add(target).sub(this.oldTarget);
+
+      this.goalPosition.copy(position);
+    }
 
     scene.setHotspotsVisibility(true);
 
@@ -754,6 +865,14 @@ export class ARRenderer extends EventDispatcher<
   }
 
   public moveToFloor(frame: XRFrame) {
+    // Skip hit testing for world-space mode only during initial placement
+    if (this.xrMode === XRMode.WORLD_SPACE &&
+        !this.worldSpaceInitialPlacementDone) {
+      this.placementBox!.show = false;
+      this.dispatchEvent({type: 'status', status: ARStatus.OBJECT_PLACED});
+      return;
+    }
+
     const hitSource = this.initialHitSource;
     if (hitSource == null) {
       return;
@@ -813,8 +932,15 @@ export class ARRenderer extends EventDispatcher<
     } else if (fingers.length === 2) {
       box.show = true;
       this.isTwoHandInteraction = true;
-      const {separation} = this.fingerPolar(fingers);
-      this.firstRatio = separation / scene.pivot.scale.x;
+      const {separation, angle} = this.fingerPolar(fingers);
+      this.lastAngle = angle;  // Initialize lastAngle, do not update goalYaw
+      if (this.firstRatio === 0) {
+        this.firstRatio = separation / scene.scenePivot.scale.x;
+      }
+      if (scene.canScale) {
+        this.setScale(separation);
+      }
+      return;
     }
   };
 
@@ -828,8 +954,24 @@ export class ARRenderer extends EventDispatcher<
     this.placementBox!.show = false
   };
 
+  private onBeforeXRSelect = (event: Event) => {
+    const path = event.composedPath();
+    for (const element of path) {
+      if (element instanceof HTMLElement) {
+        const tagName = element.tagName.toLowerCase();
+        if (tagName === 'input' || tagName === 'button' ||
+            tagName === 'select' || tagName === 'textarea' || tagName === 'a' ||
+            element.hasAttribute('data-pointer-coalesce') ||
+            element.classList.contains('interactive')) {
+          event.preventDefault();
+          break;
+        }
+      }
+    }
+  };
+
   private fingerPolar(fingers: XRTransientInputHitTestResult[]):
-      {separation: number, deltaYaw: number} {
+      {separation: number, deltaYaw: number, angle: number} {
     const fingerOne = fingers[0].inputSource.gamepad!.axes;
     const fingerTwo = fingers[1].inputSource.gamepad!.axes;
     const deltaX = fingerTwo[0] - fingerOne[0];
@@ -841,16 +983,21 @@ export class ARRenderer extends EventDispatcher<
     } else if (deltaYaw < -Math.PI) {
       deltaYaw += 2 * Math.PI;
     }
-    this.lastAngle = angle;
     return {
       separation: Math.sqrt(deltaX * deltaX + deltaY * deltaY),
-      deltaYaw: deltaYaw
+      deltaYaw: deltaYaw,
+      angle: angle
     };
   }
 
   private setScale(separation: number) {
-    const scale = separation / this.firstRatio;
-    this.goalScale = (Math.abs(scale - 1) < SCALE_SNAP) ? 1 : scale;
+    let scale = separation / this.firstRatio;
+    scale = (Math.abs(scale - 1) < SCALE_SNAP) ? 1 : scale;
+    // Clamp to min/max for world-space mode after initial placement
+    if (this.isWorldSpaceReady()) {
+      scale = Math.max(this.minScale, Math.min(this.maxScale, scale));
+    }
+    this.goalScale = scale;
   }
 
   private processInput(frame: XRFrame) {
@@ -860,26 +1007,36 @@ export class ARRenderer extends EventDispatcher<
     }
     const fingers = frame.getHitTestResultsForTransientInput(hitSource);
     const scene = this.presentedScene!;
-    const scale = scene.pivot.scale.x;
+    const scale = scene.scenePivot.scale.x;
 
-    // Check for two-finger interaction first
+    // Robust two-finger gesture handling
     if (fingers.length === 2) {
-      this.isTranslating = false;
-      this.isRotating = false;
-      this.isTwoHandInteraction = true;
-      const {separation} = this.fingerPolar(fingers);
-      if (this.firstRatio === 0) {
+      if (!this.wasTwoFingering) {
+        // New two-finger gesture starting
+        const {separation, angle} = this.fingerPolar(fingers);
         this.firstRatio = separation / scale;
+        this.lastAngle = angle;
+        this.wasTwoFingering = true;
+        this.isTwoHandInteraction = true;
+        // Do not apply rotation or scale on this frame
+        return;
       }
+      // Ongoing two-finger gesture
+      const {separation, deltaYaw, angle} = this.fingerPolar(fingers);
+      this.goalYaw += deltaYaw;
+      this.lastAngle = angle;
       if (scene.canScale) {
         this.setScale(separation);
       }
+      this.isTwoHandInteraction = true;
       return;
-    } else if (this.isTwoHandInteraction && fingers.length < 2) {
-      // If we lose the second finger, stop scaling
-      this.isTwoHandInteraction = false;
-      this.firstRatio = 0;
-      return;
+    } else {
+      if (this.wasTwoFingering) {
+        // Two-finger gesture ended
+        this.wasTwoFingering = false;
+        this.isTwoHandInteraction = false;
+        this.firstRatio = 0;
+      }
     }
 
     if (!this.isTranslating && !this.isTwoHandInteraction && !this.isRotating) {
@@ -910,7 +1067,13 @@ export class ARRenderer extends EventDispatcher<
 
         this.goalPosition.sub(this.lastDragPosition);
 
-        if (this.placeOnWall === false) {
+        // For world-space mode after initial placement, allow full Y-axis
+        // control
+        if (this.isWorldSpaceReady()) {
+          // Use the hit point directly without floor constraints
+          this.goalPosition.add(hit);
+        } else if (this.placeOnWall === false) {
+          // Original logic for screen-space or initial world-space placement
           const offset = hit.y - this.lastDragPosition.y;
           // When a lower floor is found, keep the model at the same height, but
           // drop the placement box to the floor. The model falls on select end.
@@ -923,44 +1086,56 @@ export class ARRenderer extends EventDispatcher<
             cameraPosition.multiplyScalar(alpha);
             hit.multiplyScalar(1 - alpha).add(cameraPosition);
           }
+          this.goalPosition.add(hit);
+        } else {
+          this.goalPosition.add(hit);
         }
 
-        this.goalPosition.add(hit);
         this.lastDragPosition.copy(hit);
       });
     }
   }
 
-  private applyXRControllerRotation(controller: XRController, pivot: Object3D) {
+  private applyXRControllerRotation(
+      controller: XRController, scenePivot: Object3D) {
     if (!controller.userData.turning) {
       return;
     }
-    const angle = (controller.position.x - controller.userData.initialX) * ROTATION_SENSIVITY;
+    const angle = (controller.position.x - controller.userData.initialX) *
+        ROTATION_SENSIVITY;
     this.deltaRotation.setFromAxisAngle(AXIS_Y, angle);
-    pivot.quaternion.multiplyQuaternions(this.deltaRotation, pivot.quaternion);
+    scenePivot.quaternion.multiplyQuaternions(
+        this.deltaRotation, scenePivot.quaternion);
   }
 
   private handleScalingInXR(scene: ModelScene, delta: number) {
+    // Allow manual scaling for world-space mode after initial placement
+    if (this.xrMode === XRMode.WORLD_SPACE &&
+        !this.worldSpaceInitialPlacementDone) {
+      return;
+    }
+
     if (this.xrController1 && this.xrController2 && this.isTwoHandInteraction) {
       const dist = this.controllerSeparation();
       this.setScale(dist);
       this.scaleLine.scale.z = -dist;
       this.scaleLine.lookAt(this.xrController2.position);
     }
-    const oldScale = scene.pivot.scale.x;
+    const oldScale = scene.scenePivot.scale.x;
     if (this.goalScale !== oldScale) {
-      const newScale = this.scaleDamper.update(oldScale, this.goalScale, delta, 1);
-      scene.pivot.scale.set(newScale, newScale, newScale);
+      const newScale =
+          this.scaleDamper.update(oldScale, this.goalScale, delta, 1);
+      scene.scenePivot.scale.set(newScale, newScale, newScale);
     }
   }
 
   private updatePivotPosition(scene: ModelScene, delta: number) {
-    const {pivot} = scene;
+    const {scenePivot} = scene;
     const box = this.placementBox!;
     const boundingRadius = scene.boundingSphere.radius;
     const goal = this.goalPosition;
-    const position = pivot.position;
-  
+    const position = scenePivot.position;
+
     let source = ChangeSource.NONE;
     if (!goal.equals(position)) {
       source = ChangeSource.USER_INTERACTION;
@@ -969,11 +1144,11 @@ export class ARRenderer extends EventDispatcher<
       y = this.yDamper.update(y, goal.y, delta, boundingRadius);
       z = this.zDamper.update(z, goal.z, delta, boundingRadius);
       position.set(x, y, z);
-  
+
       if (this.xrMode === XRMode.SCREEN_SPACE && !this.isTranslating) {
         const offset = goal.y - y;
         if (this.placementComplete && this.placeOnWall === false) {
-          box.offsetHeight = offset / scene.pivot.scale.x;
+          box.offsetHeight = offset / scene.scenePivot.scale.x;
           scene.setShadowOffset(offset);
         } else if (offset === 0) {
           this.placementComplete = true;
@@ -984,9 +1159,27 @@ export class ARRenderer extends EventDispatcher<
       if (this.xrMode !== XRMode.SCREEN_SPACE && goal.equals(position)) {
         scene.setShadowIntensity(AR_SHADOW_INTENSITY);
       }
+
+      // For world-space mode after initial placement, don't constrain Y
+      // position
+      if (this.isWorldSpaceReady()) {
+        // Allow full Y-axis movement without floor constraints
+        scene.setShadowIntensity(AR_SHADOW_INTENSITY);
+      }
     }
+
+    // Handle automatic scaling for world-space mode only during initial
+    // placement
+    if (this.xrMode === XRMode.WORLD_SPACE &&
+        !this.worldSpaceInitialPlacementDone &&
+        this.goalScale !== scenePivot.scale.x) {
+      const newScale =
+          this.scaleDamper.update(scenePivot.scale.x, this.goalScale, delta, 1);
+      scenePivot.scale.set(newScale, newScale, newScale);
+    }
+
     scene.updateTarget(delta);
-  
+
     // Return the source so the caller can use it for camera-change events
     return source;
   }
@@ -994,9 +1187,9 @@ export class ARRenderer extends EventDispatcher<
   private updateYaw(scene: ModelScene, delta: number) {
     // yaw must be updated last, since this also updates the shadow position.
     quaternion.setFromAxisAngle(vector3.set(0, 1, 0), this.goalYaw);
-    const angle = scene.pivot.quaternion.angleTo(quaternion);
+    const angle = scene.scenePivot.quaternion.angleTo(quaternion);
     const angleStep = angle - this.yawDamper.update(angle, 0, delta, Math.PI);
-    scene.pivot.quaternion.rotateTowards(quaternion, angleStep);
+    scene.scenePivot.quaternion.rotateTowards(quaternion, angleStep);
   }
 
   private updateMenuPanel(scene: ModelScene, box: PlacementBox, delta: number) {
@@ -1008,16 +1201,19 @@ export class ARRenderer extends EventDispatcher<
 
   private applyXRInputToScene(delta: number) {
     const scene = this.presentedScene!;
-    const pivot = scene.pivot;
+    const scenePivot = scene.scenePivot;
     const box = this.placementBox!;
 
     this.updatePlacementBoxOpacity(box, delta);
     this.updateTwoHandInteractionState();
-    this.applyXRControllerRotations(pivot);
+    this.applyXRControllerRotations(scenePivot);
     this.handleScalingInXR(scene, delta);
 
-    if (pivot.parent !== scene) {
-      return;  // attached to controller instead
+    if (scenePivot.parent !== scene) {
+      // attached to controller instead
+      // when moving the model, the menu panel should disapear
+      this.updateMenuPanel(scene, box, delta);
+      return;
     }
 
     const source = this.updatePivotPosition(scene, delta);
@@ -1027,42 +1223,85 @@ export class ARRenderer extends EventDispatcher<
   }
 
   private updatePlacementBoxOpacity(box: PlacementBox, delta: number) {
-    box.updateOpacity(delta);
+    // Use the new enhanced update method that includes distance scaling and
+    // visual state
+    const camera = this.presentedScene!.getCamera();
+    box.update(delta, camera.position);
+
+    // Update interaction state based on hover
+    const over1 = this.hover(this.xrController1!);
+    const over2 = this.hover(this.xrController2!);
+    const isHovered = (over1 || over2) && !this.isTwoHandInteraction;
+
+    // Set interaction state for visual feedback
+    box.setInteractionState(this.isTranslating || this.isRotating, isHovered);
   }
 
   private updateTwoHandInteractionState() {
-    const bothSelected = this.xrController1?.userData.isSelected && this.xrController2?.userData.isSelected;
+    const bothSelected = this.xrController1?.userData.isSelected &&
+        this.xrController2?.userData.isSelected;
     this.isTwoHandInteraction = !!bothSelected;
   }
 
-  private applyXRControllerRotations(pivot: Object3D) {
+  private applyXRControllerRotations(scenePivot: Object3D) {
     if (!this.isTwoHandInteraction) {
-      if (this.xrController1) this.applyXRControllerRotation(this.xrController1, pivot);
-      if (this.xrController2) this.applyXRControllerRotation(this.xrController2, pivot);
+      if (this.xrController1)
+        this.applyXRControllerRotation(this.xrController1, scenePivot);
+      if (this.xrController2)
+        this.applyXRControllerRotation(this.xrController2, scenePivot);
     }
   }
 
   private dispatchCameraChangeEvent(scene: ModelScene, source: ChangeSource) {
     scene.element.dispatchEvent(new CustomEvent<CameraChangeDetails>(
-      'camera-change', {detail: {source}}
-    ));
+        'camera-change', {detail: {source}}));
   }
 
   private updateXRControllerHover() {
     const over1 = this.hover(this.xrController1!);
     const over2 = this.hover(this.xrController2!);
-    this.placementBox!.show = (over1 || over2) && !this.isTwoHandInteraction;
+    const isHovered = (over1 || over2) && !this.isTwoHandInteraction;
+
+    // Use the new interaction state system
+    if (this.placementBox) {
+      this.placementBox.setInteractionState(
+          this.isTranslating || this.isRotating, isHovered);
+      this.placementBox.show = isHovered;
+    }
+  }
+
+
+
+  /**
+   * Enable user interaction for world-space mode after initial automatic
+   * placement
+   */
+  private enableWorldSpaceUserInteraction() {
+    // Show placement box to indicate model can be moved
+    if (this.placementBox) {
+      this.placementBox.show = true;
+    }
+
+    // Enable shadow to show model is placed
+    if (this.presentedScene) {
+      this.presentedScene.setShadowIntensity(AR_SHADOW_INTENSITY);
+    }
   }
 
   private handleFirstView(frame: XRFrame, time: number) {
-    this.moveToFloor(frame);
+    // Skip moveToFloor for world-space mode after initial placement to prevent
+    // overriding
+    if (this.xrMode !== XRMode.WORLD_SPACE ||
+        !this.worldSpaceInitialPlacementDone) {
+      this.moveToFloor(frame);
+    }
     this.processInput(frame);
-  
+
     const delta = time - this.lastTick!;
     this.applyXRInputToScene(delta);
     this.renderer.preRender(this.presentedScene!, time, delta);
     this.lastTick = time;
-  
+
     this.presentedScene!.renderShadow(this.threeRenderer);
   }
 
@@ -1075,30 +1314,36 @@ export class ARRenderer extends EventDispatcher<
     }
 
     this.frame = frame;
-    // increamenets a counter tracking how many frames have been processed sinces the session started
+    // increamenets a counter tracking how many frames have been processed
+    // sinces the session started
     ++this.frames;
-    // refSpace and pose are used to get the user's current position and orientation in the XR session.
+    // refSpace and pose are used to get the user's current position and
+    // orientation in the XR session.
     const refSpace = this.threeRenderer.xr.getReferenceSpace()!;
     const pose = frame.getViewerPose(refSpace);
 
     // Tracking loss Detection.
-    // If pos is null, it means the XR system cannot currently track the user's position(e.g., the camera is covered or the env can't be recognized).
+    // If pos is null, it means the XR system cannot currently track the user's
+    // position(e.g., the camera is covered or the env can't be recognized).
     // Checks if we previously throught tracking was working
-    // Ensures that we don't report tracking loss too early(sometimes the first few frames can be null as the system initializes).
+    // Ensures that we don't report tracking loss too early(sometimes the first
+    // few frames can be null as the system initializes).
     if (pose == null && this.tracking === true && this.frames > INIT_FRAMES) {
       this.tracking = false;
       this.dispatchEvent({type: 'tracking', status: ARTracking.NOT_TRACKING});
     }
 
-    // Prevent rendering if there's no valid pose, no scene, or the scene isen't loaded.
+    // Prevent rendering if there's no valid pose, no scene, or the scene isen't
+    // loaded.
     const scene = this.presentedScene;
     if (pose == null || scene == null || !scene.element.loaded) {
       this.threeRenderer.clear();
       return;
     }
 
-    // Tracking REcovery Detection. 
-    // If tracking was previously lost, but now we have a valid pose, it meanse tracking has been recovered.
+    // Tracking REcovery Detection.
+    // If tracking was previously lost, but now we have a valid pose, it meanse
+    // tracking has been recovered.
     if (this.tracking === false) {
       this.tracking = true;
       this.dispatchEvent({type: 'tracking', status: ARTracking.TRACKING});
@@ -1119,5 +1364,88 @@ export class ARRenderer extends EventDispatcher<
 
       this.threeRenderer.render(scene, scene.getCamera());
     }
+  }
+
+  /**
+   * Calculate optimal scale and position for world-space AR presentation
+   * Similar to the SVXR:FrameModel approach for consistent model presentation
+   *
+   * This method implements automatic model framing for world-space AR sessions:
+   * 1. Calculates optimal viewing distance based on model size and minimum
+   * distance
+   * 2. Positions model at a drop angle below camera center for natural viewing
+   * 3. Automatically scales model to fit within viewport constraints
+   * 4. Ensures consistent presentation across different model sizes
+   *
+   * Note: This automatic placement only happens on the first session start.
+   * After initial placement, users have full control over model position,
+   * rotation, and scale.
+   */
+  private calculateWorldSpaceOptimalPlacement(
+      scene: ModelScene, camera: Camera): {position: Vector3, scale: number} {
+    // Get model bounding box half extents
+    const boundingBox = scene.boundingBox;
+    const halfExtent = {
+      x: (boundingBox.max.x - boundingBox.min.x) / 2,
+      y: (boundingBox.max.y - boundingBox.min.y) / 2,
+      z: (boundingBox.max.z - boundingBox.min.z) / 2
+    };
+
+    // Compute view distance (with extra padding for model-viewer)
+    const placementBoxPadding = PLACEMENT_BOX_EXTRA_PADDING;
+    const viewDistance = Math.max(
+        MIN_WORLD_SPACE_DISTANCE + placementBoxPadding,
+        2 * Math.max(halfExtent.x, halfExtent.z) + placementBoxPadding);
+
+    // Compute ideal view position (drop angle below camera center)
+    const dropAngleRad = VIEW_DROP_DEGREES * Math.PI / 180;
+    const idealViewPosition = new Vector3(
+        0,
+        -viewDistance * Math.sin(dropAngleRad),
+        -viewDistance * Math.cos(dropAngleRad));
+
+    // Transform ideal view position to world space
+    const worldFromCamera = camera.matrixWorld;
+    const idealWorldPosition =
+        idealViewPosition.clone().applyMatrix4(worldFromCamera);
+
+    // Compute turntable and vertical radii
+    const turntableRadius =
+        Math.max(halfExtent.x, halfExtent.z) + placementBoxPadding;
+    const verticalRadius = halfExtent.y;
+    const turntableRadiusLimit = viewDistance * VIEW_RATIO;
+    const verticalRadiusLimit = viewDistance * VIEW_RATIO;
+
+    // Compute optimal scale
+    const verticalScale =
+        verticalRadiusLimit / Math.max(verticalRadius, MIN_MODEL_SIZE);
+    const turntableScale =
+        turntableRadiusLimit / Math.max(turntableRadius, MIN_MODEL_SIZE);
+    const optimalScale = Math.min(verticalScale, turntableScale);
+
+    // Offset so the model's base sits at the ideal world position
+    // (subtract scaled half height in Y)
+
+    const finalPosition = idealWorldPosition.clone().sub(
+        new Vector3(0, optimalScale * halfExtent.y, 0));
+
+    return {position: finalPosition, scale: optimalScale};
+  }
+
+  /**
+   * Calculate min/max scale for world-space AR, SVXR-style
+   */
+  private calculateWorldSpaceScaleLimits(scene: ModelScene) {
+    const size = scene.size;
+    const largestDimension = Math.max(size.x, size.y, size.z);
+    const smallestDimension =
+        Math.max(Math.min(size.x, size.y, size.z), MODEL_SIZE_EPSILON);
+    const scaleMin =
+        MIN_MODEL_SIZE / Math.max(largestDimension, MODEL_SIZE_EPSILON);
+    const scaleMax =
+        MAX_MODEL_SIZE / Math.max(smallestDimension, MODEL_SIZE_EPSILON);
+    // Clamp to initial scale if needed
+    this.minScale = Math.min(scaleMin, scaleMax, this.goalScale);
+    this.maxScale = Math.max(scaleMin, scaleMax, this.goalScale);
   }
 }

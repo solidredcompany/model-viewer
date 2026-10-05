@@ -13,11 +13,13 @@
  * limitations under the License.
  */
 
+import '../renderer-gate.js';
+
 import {expect} from 'chai';
 import {Camera, Vector3} from 'three';
 
 import {$controls, $promptAnimatedContainer, $promptElement, CameraChangeDetails, cameraOrbitIntrinsics, ControlsInterface, DEFAULT_FOV_DEG, DEFAULT_MIN_FOV_DEG, INTERACTION_PROMPT, SphericalPosition} from '../../features/controls.js';
-import ModelViewerElementBase, {$scene, $statusElement, $userInputElement, Vector3D} from '../../model-viewer-base.js';
+import ModelViewerElementBase, {$renderer, $scene, $statusElement, $userInputElement, Vector3D} from '../../model-viewer-base.js';
 import {ModelViewerElement} from '../../model-viewer.js';
 import {StyleEvaluator} from '../../styles/evaluators.js';
 import {ChangeSource, SmoothControls} from '../../three-components/SmoothControls.js';
@@ -185,6 +187,21 @@ suite('Controls', () => {
 
         await cameraChangeDispatches;
       });
+
+      test('does not throw when AR renderer is unavailable', async () => {
+        const renderer = element[$renderer];
+        const {arRenderer} = renderer;
+        renderer.arRenderer = null as any;
+        try {
+          element.cameraTarget = '3m 2m 1m';
+          element.jumpCameraToGoal();
+          await element.updateComplete;
+        } finally {
+          renderer.arRenderer = arRenderer;
+        }
+
+        expect(element.getCameraTarget().toString()).to.be.equal('3m 2m 1m');
+      });
     });
 
     test('defaults FOV correctly', async () => {
@@ -214,6 +231,7 @@ suite('Controls', () => {
       expect(fov).to.be.closeTo(DEFAULT_FOV_DEG, .001);
       element.setAttribute('style', 'width: 200px; height: 300px');
       await rafPasses();
+      await timePasses(50);
       await rafPasses();
 
       expect(element.getFieldOfView()).to.be.greaterThan(fov);

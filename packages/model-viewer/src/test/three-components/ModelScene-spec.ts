@@ -13,8 +13,10 @@
  * limitations under the License.
  */
 
+import '../renderer-gate.js';
+
 import {expect} from 'chai';
-import {Matrix4, Mesh, SphereGeometry, Vector3} from 'three';
+import {LoopRepeat, Matrix4, Mesh, SphereGeometry, Vector3} from 'three';
 
 import {$scene} from '../../model-viewer-base.js';
 import {ModelViewerElement} from '../../model-viewer.js';
@@ -44,7 +46,7 @@ suite('ModelScene', () => {
 
   suite('with a model', () => {
     setup(async () => {
-      await scene.setSource(assetPath('models/Astronaut.glb'));
+      await scene.setSource(assetPath('models/soldier.glb'));
     });
 
     suite('setShadowIntensity', () => {
@@ -61,6 +63,67 @@ suite('ModelScene', () => {
         expect(scene.shadow).to.be.not.ok;
         scene.setShadowIntensity(1);
         expect(scene.shadow).to.be.ok;
+      });
+    });
+
+    test('can append and play an animation', () => {
+      expect(scene.animationNames.length).to.be.greaterThan(0);
+      const animationName = scene.animationNames[0];
+      scene.appendAnimation(animationName);
+      expect(scene.appendedAnimations).to.include(animationName);
+    });
+
+    test('can detach an appended animation', () => {
+      expect(scene.animationNames.length).to.be.greaterThan(0);
+      const animationName = scene.animationNames[0];
+      scene.appendAnimation(animationName);
+      expect(scene.appendedAnimations).to.include(animationName);
+      scene.detachAnimation(animationName, false);
+      expect(scene.appendedAnimations).to.not.include(animationName);
+    });
+
+    suite('appendAnimation repetitionCount validation', () => {
+      // Returns the repetitionCount-related warnings emitted while appending the
+      // first animation with the given repetitionCount.
+      const repetitionWarnings = (repetitionCount: any): string[] => {
+        const warnings: string[] = [];
+        const originalWarn = console.warn;
+        console.warn = (...args: any[]) => void warnings.push(args.join(' '));
+        try {
+          scene.appendAnimation(
+              scene.animationNames[0], LoopRepeat, repetitionCount);
+        } finally {
+          console.warn = originalWarn;
+        }
+        return warnings.filter((w) => w.includes('repetitionCount'));
+      };
+
+      test('a valid numeric value does not warn', () => {
+        expect(repetitionWarnings(1)).to.be.empty;
+      });
+
+      test('Infinity (the default) does not warn', () => {
+        expect(repetitionWarnings(Infinity)).to.be.empty;
+      });
+
+      test('a numeric value < 1 warns', () => {
+        expect(repetitionWarnings(0)).to.have.lengthOf(1);
+      });
+
+      test('NaN warns', () => {
+        expect(repetitionWarnings(NaN)).to.have.lengthOf(1);
+      });
+
+      test('a numeric string >= 1 does not warn', () => {
+        expect(repetitionWarnings('3')).to.be.empty;
+      });
+
+      test('a numeric string < 1 warns', () => {
+        expect(repetitionWarnings('0')).to.have.lengthOf(1);
+      });
+
+      test('a non-numeric string warns', () => {
+        expect(repetitionWarnings('abc')).to.have.lengthOf(1);
       });
     });
   });

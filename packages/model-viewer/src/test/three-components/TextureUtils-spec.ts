@@ -13,9 +13,13 @@
  * limitations under the License.
  */
 
+import '../renderer-gate.js';
+
 import {expect} from 'chai';
 import {Cache, CubeReflectionMapping, EquirectangularReflectionMapping, WebGLRenderer} from 'three';
 
+import {CachingGLTFLoader} from '../../three-components/CachingGLTFLoader.js';
+import {Renderer} from '../../three-components/Renderer.js';
 import TextureUtils from '../../three-components/TextureUtils.js';
 import {assetPath} from '../helpers.js';
 
@@ -24,17 +28,24 @@ import {assetPath} from '../helpers.js';
 const canvas = document.createElement('canvas');
 const EQUI_URL = assetPath('environments/spruit_sunrise_1k_LDR.jpg');
 const HDR_EQUI_URL = assetPath('environments/spruit_sunrise_1k_HDR.hdr');
+const KTX2_URL = assetPath('models/CesiumLogoFlat.ktx2');
 
 suite('TextureUtils', () => {
   let threeRenderer: WebGLRenderer;
 
-  suiteSetup(() => {
+  suiteSetup(function() {
+    if (!Renderer.singleton.canRender) {
+      this.skip();
+    }
     // The threeRenderer can retain state, so these tests have the possibility
     // of getting different results in different orders. However, our use of the
     // threeRenderer *should* always return its state to what it was before to
     // avoid this kind of problem (and many other headaches).
     threeRenderer = new WebGLRenderer({canvas});
     threeRenderer.debug.checkShaderErrors = true;
+    CachingGLTFLoader.setKTX2TranscoderLocation(
+        'https://www.gstatic.com/basis-universal/versioned/2021-04-15-ba1c3e4/');
+    CachingGLTFLoader.initializeKTX2Loader(threeRenderer);
   });
 
   suiteTeardown(() => {
@@ -61,6 +72,33 @@ suite('TextureUtils', () => {
       expect(texture.isTexture).to.be.ok;
       expect(texture.name).to.be.eq(EQUI_URL);
       expect(texture.mapping).to.be.eq(EquirectangularReflectionMapping);
+    });
+    test(
+        'decodes a gainmap and disposes intermediate render targets',
+        async () => {
+          const GAINMAP_URL =
+              assetPath('environments/spruit_sunrise_1k_HDR.jpg');
+          const THREE = await import('three');
+          let disposeCount = 0;
+          const originalDispose = THREE.WebGLRenderTarget.prototype.dispose;
+          THREE.WebGLRenderTarget.prototype.dispose = function() {
+            disposeCount++;
+            return originalDispose.call(this);
+          };
+
+          try {
+            const texture = await textureUtils.loadEquirect(GAINMAP_URL);
+            texture.dispose();
+            expect(disposeCount).to.be.greaterThan(0);
+          } finally {
+            THREE.WebGLRenderTarget.prototype.dispose = originalDispose;
+          }
+        });
+    test('loads a valid KTX2 texture from URL', async () => {
+      let texture = await textureUtils.loadImage(KTX2_URL, false);
+      texture.dispose();
+      expect(texture.isTexture).to.be.ok;
+      expect(texture.name).to.be.eq(KTX2_URL);
     });
     test('loads a valid HDR texture from URL', async () => {
       let texture = await textureUtils.loadEquirect(HDR_EQUI_URL);
@@ -103,6 +141,32 @@ suite('TextureUtils', () => {
 
       expect(environment.name).to.be.eq(EQUI_URL);
       expect(environment.mapping).to.be.eq(EquirectangularReflectionMapping);
+    });
+
+    test('retries a url whose earlier load failed', async () => {
+      const realLoadEquirect = textureUtils.loadEquirect.bind(textureUtils);
+      let calls = 0;
+      textureUtils.loadEquirect = async (url: string) => {
+        calls++;
+        if (calls === 1) {
+          throw new Error('network error');
+        }
+        return realLoadEquirect(url);
+      };
+
+      let failed = false;
+      try {
+        await textureUtils.generateEnvironmentMapAndSkybox(EQUI_URL);
+      } catch (e) {
+        failed = true;
+      }
+      expect(failed).to.be.eq(true);
+
+      const textures =
+          await textureUtils.generateEnvironmentMapAndSkybox(EQUI_URL);
+
+      expect(textures.environmentMap.name).to.be.eq(EQUI_URL);
+      expect(textures.skybox!.name).to.be.eq(EQUI_URL);
     });
 
     test(
